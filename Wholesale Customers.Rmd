@@ -1,0 +1,372 @@
+---
+title: "Wholesale Customers - Clustering in R"
+author: "Nancy Huynh"
+date: '2019-02-22'
+output: 
+  github_document:
+    toc: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Clustering Wholesale Customers
+
+After taking an introductory course on clustering in R at Datacamp I applied it to customer data of a wholesale company that's freely available from the [UCI Machine Learning Library](https://archive.ics.uci.edu/ml/datasets/Wholesale+customers). The aim is to segment the customers in a way that could be useful for marketing/sales.
+
+
+## Data Imports and Libraries
+```{r warning = FALSE, message = FALSE}
+## LOAD LIBRARIES
+library(tidyverse)
+library(cluster)
+library(corrplot)
+library(dbscan)
+```
+
+```{r warning = FALSE}
+## IMPORT DATA
+file_path<- file.path("~", "Data for R", "wholesale_customers_data.csv")
+whole_cust_full <- read_csv(file_path)
+```
+## Data Exploration
+
+### The Wholesale Customers Data
+There are two categorical variables (Channel, Region) and six continous variables on the amount (monetary unit) purchased by customers on each category (Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen). Total of 440 observations with no missing values.
+
+```{r}
+str(whole_cust_full)
+summary(whole_cust_full)
+dim(whole_cust_full)
+sum(is.na(whole_cust_full))
+```
+
+For this analysis the two categorical variables will be dropped. There's more learning and research I have to do for clustering mixed data types that I'll post in the future.
+
+```{r}
+whole_cust <- select(whole_cust_full, -Channel, -Region)
+```
+
+### Scatterplot Matrix & Boxplots
+Visual inspection of the continous variables in the scatterplot matrix shows there's possibly a number of outliers. Added some side-by-side boxplots for further inspection also points to a number of outliers for each variable. 
+
+```{r echo = FALSE}
+plot(whole_cust)
+```
+
+```{r}
+whole_cust %>% 
+  gather(key = Category, value = Amount) %>%
+  ggplot(aes(x = Category, y = Amount)) +
+  geom_boxplot(alpha = 0.2)
+```
+
+### Left-skewed Variables
+All variables are left-skewed, and we can also see some relatively very high spenders for each category. While applying a `log()` transformation to each variable makes them more normally distributed (not shown), I opted not to use a log transformation when running k-means and HDBSCAN below. HDBSCAN is supposed to deal well with outliers anyway. Meanwhile, k-means on the log-transformed data would cluster big spenders with more moderate spenders as the algorithm is designed to reduce within-cluster sum of squares. When it comes to sales/marketing the big spending customers should be a segment of its own. In the case of wholesale customers, it would make sense to treat these top spenders on a more bespoke basis as there probably aren't as many compared to consumer-type of business.
+
+```{r}
+whole_cust %>% 
+  gather(key = Category, value = Amount) %>%
+  ggplot(aes(x = Amount)) +
+  geom_histogram(bins = 100) +
+  facet_wrap(~ Category, scales = "free")
+```
+
+#### Dealing with Outliers?
+My original plan was to run the k-means algorithm, but with these outliers it is likely that some of the customers wouldn't fit well into a cluster. K-means would include every observation into a cluster. After some research I found that DBSCAN and HDBSCAN clustering algorithms take into account "noise" (i.e. outliers). Both of these options do not force *every*  data point into a cluster -- if a data point lies outside of the specified starting parameters, it will be classified as "noise" and not included in any resulting cluster. In addition to running HDBSCAN, out of curiosity, I also ran k-means in two scenarios:
+
+* all customer purchase data
+* customer purchase data excluding the top 10 customers from each of the six categories
+
+
+### Correlation Matrix
+There's fairly high positive correlation between Milk and Grocery, Milk and Detergents_Paper, and very high positive correlation between Grocery and Detergents_Paper. Knowing the purchases correlations could be useful when considering sales/marketing strategies once the customers have been segmented. For example, a sales person working with a new customer who is ordering a lot of Grocery items could recommend some Detergents_Paper products.
+
+```{r}
+corrplot.mixed(cor(whole_cust), lower.col = "grey", tl.cex = 0.7, order = "FPC")
+```
+
+
+## HDBSCAN (Hierarchical Density-Based Spatial Clustering of Applications with Noise)
+With `minPts` greater than 11 the HDBSCAN function is unable to produce stable clusters. The `minPts` are the minimum number of data points per cluster. The number of noise points and number of clusters are summarized for minPts 2 to 11:
+
+| minPts | # Clusters | # Noise |
+|:------:|:----------:|:-------:|
+| 11     | 2          | 414     |
+| 10     | 2          | 405     |
+| 9      | 2          | 273     |
+| 8      | 2          | 275     |
+| 7      | 2          | 91      |
+| 6      | 2          | 85      |
+| 5      | 4          | 115     |
+| 4      | 9          | 217     |
+| 3      | 8          | 87      |
+| 2      | 107        | 150     |
+
+With only 440 observations not much clustering is being done if over 50% (220) of the points are considered noise, which rules out a number of the minPts. This leaves minPts of 7, 6, 5, 3, 2. Meanwhile 8+ clusters is too many, especially since most of the clusters are very small with one large cluster. Thus, minPts 7, 6, 5 make the most sense. For minPts 7 and 6, the clusters were very similar--one small cluster and one very large cluster. And for minPts = 5, there are 3 clusters that are very small and one large 4th cluster. The clusters found with minPts 5 and 6 showed customers who primarily spend a lot in the Fresh category (and less of everything else) is its own cluster.
+
+#### HDBSCAN minPts = 6
+```{r}
+model_hdb_6 <- hdbscan(whole_cust, minPts = 6)
+print(model_hdb_6)
+
+whole_cust %>% 
+  mutate(cluster = model_hdb_6$cluster) %>%
+  group_by(cluster) %>%
+  summarise_all(mean) #cluster 0 is noise
+
+plot(model_hdb_6, show_flat = TRUE)
+```
+
+*Note: rectangles drawn around stable clusters (numbered)*
+
+The "noise" data looks to have pretty high averages for all categories. Based on the histograms we can see they're not just big spenders, although there are some.
+```{r}
+whole_cust %>% 
+  mutate(cluster = model_hdb_6$cluster) %>%
+  gather(key = Category, value = Amount, -cluster) %>%
+  filter(cluster == 0) %>%
+  ggplot(aes(x = Amount)) +
+  geom_histogram(bins = 25) +
+  facet_wrap(~Category, scales = "free")
+```
+
+#### HDBSCAN minPts = 5
+The 4 clusters identified here show 3 small clusters that appear to have fairly distinct average spending in each category. For example cluster 3 spends a lot on Milk, Grocery and Detergents_Paper, cluster 2 are big Fresh-primarily spenders. And cluster 1 looks to be big spenders in Frozen and Fresh (but not as big as cluster 2).
+```{r}
+model_hdb_5 <- hdbscan(whole_cust, minPts = 5)
+print(model_hdb_5)
+
+whole_cust %>% 
+  mutate(cluster = model_hdb_5$cluster) %>%
+  group_by(cluster) %>%
+  summarise_all(mean) #cluster 0 is noise
+
+plot(model_hdb_5, show_flat = TRUE)
+```
+
+*Note: rectangles drawn around stable clusters (numbered)*
+
+Let's see what the largest cluster looks likes with some histograms.
+```{r}
+whole_cust %>% 
+  mutate(cluster = model_hdb_5$cluster) %>%
+  gather(key = Category, value = Amount, -cluster) %>%
+  filter(cluster == 4) %>%
+  ggplot(aes(x = Amount)) +
+  geom_histogram(bins = 25) +
+  facet_wrap(~Category, scales = "free")
+```
+
+### HDBSCAN Summary
+While the clusters are quite uneven, there's definitely a group of customers that spend a lot in the Fresh category and much less of everything else. There's also a large-sized cluster that appears to spend pretty evenly across the categories on average.
+
+## K-Means Clustering
+As mentioned, I ran K-Means for all the customer purchase data and a subset that excludes the top 10 customers.
+
+### Function for Top-n Cutomers
+This function returns the index positions of the top-n customers in each category. Only unique index positions are retruned.
+
+```{r}
+top_n_cust <- function(df, n = 1, cols = dim(df)[2]) {
+  indx <- lapply(1:cols, function(col){
+    col_ordered <- order(as.numeric(unlist(df[, col])), decreasing = TRUE)
+    head(col_ordered, n)
+  })
+  
+  return(unique(as_vector(indx)))
+}
+
+```
+
+The dataframe `whole_cust_rm_top` is the subset without the top 10 customers from each category
+
+```{r}
+top_10_cust <- top_n_cust(whole_cust, 10)
+whole_cust_rm_top <- whole_cust[-top_10_cust, ]
+
+```
+
+
+### Suitable K - How Many Clusters?
+In order to cluster the data we first need to decide on a suitable k, that is the number of clusters we want. I've learned a few ways to find a suitable k value. They are below. After using these methods, contextual business logic also needs to be considered in real life. For example, is k = 10 segments reasonable for the marketing team to target? or is it too many to be practical?
+
+#### Summary of suitable k-values
+
+| Method | Full | Subset |
+|:------:|:----:|:------:|
+| Elbow  |  5   |    5   |
+| Silhouette | 2|    3   |
+| Gap    | 8+  |    8+ |
+
+*Note: The optimal number of clusters from calculating Gap statistic were different for different runs*
+
+
+#### Elbow plot method
+Plot of total within-cluster sum of squares for k values from 2 to 20. Note that the elbow plots don't show a very strong "elbow". Around k = 5 the slope starts to dramatically decrease in steepness so a suitable k may be 5.
+
+For all customers
+```{r}
+avg_tot_within_ss <- map_dbl(2:20, function(k){
+  model <- kmeans(whole_cust, centers = k)
+  model$tot.withinss
+})
+
+plot_wss_df <- data.frame(
+  k = 2:20,
+  avg_tot_within_ss = avg_tot_within_ss
+)
+
+ggplot(plot_wss_df, aes(x = k, y = avg_tot_within_ss)) +
+  geom_line() +
+  geom_point() +
+  geom_vline(xintercept = 5, color = "dodgerBlue") +
+  scale_x_continuous(breaks = 2:20) +
+  labs(title = "Elbow Plot (All Customers)")
+
+```
+
+For subset with top 10 customers (code is similar so not showing it)
+
+```{r echo = FALSE}
+avg_tot_within_ss2 <- map_dbl(2:20, function(k){
+  model <- kmeans(whole_cust_rm_top, centers = k)
+  model$tot.withinss
+})
+
+plot_wss_df2 <- data.frame(
+  k = 2:20,
+  avg_tot_within_ss = avg_tot_within_ss2
+)
+
+ggplot(plot_wss_df2, aes(x = k, y = avg_tot_within_ss)) +
+  geom_line() +
+  geom_point() +
+  geom_vline(xintercept = 5, color = "dodgerBlue") +
+  scale_x_continuous(breaks = 2:20) +
+  labs(title = "Elbow Plot (Top 10 Customers Removed)")
+```
+
+
+#### Silhouette analysis
+The "best"" k is the one with the highest average silhouette width. This means that compared to the other values of k tried, with the "best" k the data points in each of the clusters is best matched to its cluster. The best k for the full data set is k = 2, and for the subset k = 3.
+
+For all customers
+```{r}
+
+avg_sil_width <- map_dbl(2:20, function(k){
+  model <- kmeans(whole_cust, centers = k, nstart = 25)
+  sil <- silhouette(model$cluster, dist(whole_cust))
+  mean(sil[ , 3])
+})
+
+plot_sw_df <- data.frame(
+  k = 2:20,
+  avg_sil_width = avg_sil_width
+)
+
+ggplot(plot_sw_df, aes(x = k, y = avg_sil_width)) +
+  geom_line() +
+  geom_point() +
+  scale_x_continuous(breaks = 2:20) +
+  geom_vline(xintercept = 2, color = "springGreen") +
+  labs(title = "Average Silhouettes (All Customers)")
+
+```
+
+For the subset
+
+```{r echo = FALSE}
+avg_sil_width2 <- map_dbl(2:20, function(k){
+  model <- kmeans(whole_cust_rm_top, centers = k, nstart = 25)
+  sil <- silhouette(model$cluster, dist(whole_cust_rm_top))
+  mean(sil[ , 3])
+})
+
+plot_sw_df2 <- data.frame(
+  k = 2:20,
+  avg_sil_width = avg_sil_width2
+)
+
+ggplot(plot_sw_df2, aes(x = k, y = avg_sil_width)) +
+  geom_line() +
+  geom_point() +
+  scale_x_continuous(breaks = 2:20) +
+  geom_vline(xintercept = 3, color = "springGreen") +
+  labs(title = "Average Silhouettes (Top 10 Customers Removed)")
+
+```
+
+#### Gap statistic
+The gap statistic compares the total within-cluster variation for different values of k with their expected values under null reference distribution of the data (i.e. a distribution with no obvious clustering). The optimal k depends on the method we choose. The default for `clusGap` is "firstSEmax", which chooses the smallest k where the Gap statistic is not more than 1 standard error away from the first local maximum. Interestingly I ran `clusGap` a few different times and each time I got different optimal number of clusters ranging from 8-14 for both the full dataset and the subset. K-means actually seems quite unstable for both the full data and the subset with the top 10 customers removed.
+
+For all customers
+```{r}
+gap_stat <- clusGap(whole_cust, FUN = kmeans, nstart = 25, iter.max = 30, K.max = 20)
+print(gap_stat)
+
+```
+
+For the subset
+```{r echo = FALSE}
+gap_stat2 <- clusGap(whole_cust_rm_top, FUN = kmeans, nstart = 25, iter.max = 30, K.max = 20)
+print(gap_stat2)
+
+```
+
+### K-means for "Suitable" Ks
+None of the methods for finding a suitable k gave the same results. To me, 10+ clusters or customer segments seems too high to make much marketing sense, especially if we assume that the 440 observations represents the total number of customers for the business. So k-means was computed for k = 5 and k = 2 against the full data, and k = 5 and k = 3 against the subset.
+
+#### All customers, k = 5
+Clusters 1 and 2 both have relatively much higher average spend on Fresh products compared to the other categories -- although overall cluster 2 has higher average spend across all categories except Detergents_Paper. Cluster 5 are big spenders in Fresh, Milk, Grocery, and Detergents_Paper. While cluster 4 has relatively higher average spend on Milk, Grocery, and Detergents_Paper. Cluster 3, the largest sized one, appears to be lower spenders across most categories.
+```{r}
+set.seed(888)
+model_k5 <- kmeans(whole_cust, centers = 5)
+clusplot(whole_cust, model_k5$cluster, color = TRUE, shade = TRUE, lines = 0)
+print(model_k5)
+
+```
+
+
+#### All customers, k = 2
+Cluster 2, the smaller sized cluster, appears to be bigger spenders who buy lots of Fresh products. Cluster 1 is everyone else.
+```{r}
+set.seed(888)
+model_k2 <- kmeans(whole_cust, centers = 2)
+clusplot(whole_cust, model_k2$cluster, color = TRUE, shade = TRUE, lines = 0)
+print(model_k2)
+
+```
+
+
+#### Subset excluding top 10 customers, k = 5
+Again, we see that cluster 1 spends relatively on average more on Fresh products. Meanwhile cluster 2 are big Grocery and Detergents_Paper spenders. Cluster 3 again, the largest sized one, appear to be lower spenders across most categories. Cluster 5 appear to be more moderate spenders across most categories. And cluster 4 spends more on average in Milk, Groceries and Delicassen.
+```{r}
+set.seed(888)
+model_k5_2 <- kmeans(whole_cust_rm_top, centers = 5)
+clusplot(whole_cust_rm_top, model_k5_2$cluster, color = TRUE, shade = TRUE, lines = 0)
+print(model_k5_2)
+
+```
+
+
+#### Subset excluding top 10 customers, k = 3
+Again we have cluster 1 with large average spending in the Fresh category. Cluster 2 spends more on average on Milk, Grocery, and Detergents_Paper. And the last cluster is the largest with lower spending across most categories.
+```{r}
+set.seed(888)
+model_k3 <- kmeans(whole_cust_rm_top, centers = 3)
+clusplot(whole_cust_rm_top, model_k3$cluster, color = TRUE, shade = TRUE, lines = 0)
+print(model_k3)
+
+```
+
+
+### K-means Summary
+While each k value provided different clusters for the full data and the subset, there was always one cluster that had much higher average spend in the Fresh category. The largest-sized cluster always contained on average lower spenders for most categories.
+
+## Next Steps
+Consider dropping some categories like Delicassen, Frozen, and Detergents_Paper where median spend is low and there are numerous outliers adding to the noise, which is amplified in higher-dimensions. Also engineering some basic features like total spend per customer (i.e. per row) or total highly-perishable (Fresh, Milk) and long shelf-life (Grocery, Frozen) spend per customer. The Fresh category seems to distinguish clusters in most of the clustering methods used so I would include it in further analysis. Additionally I'll look into how to incorporate categorical variables in cluster analysis (i.e. Gower distance with hierarchical clustering or PAM)
+
+## Overall Thoughts
+Analysing this real-life dataset taught me a lot about the different ways to cluster data and how it is nowhere near a perfect science for customer segmentation. The fact that a cluster method can't just output the answer is the best part of data analysis--otherwise it would be pretty boring. I will be trying out the things mentioned in the Next Steps in a later post.
